@@ -1,0 +1,47 @@
+version: 2.1
+orbs:
+  browser-tools: circleci/browser-tools@0.1.3
+
+jobs:
+  docker-build-image:
+    docker:
+    - image: enquizit/cc-docker-git-aws:latest
+    steps:
+    - checkout
+    - setup_remote_docker:
+        docker_layer_caching: true
+    - run:
+        name: Test aws access
+        command: |
+          aws sts get-caller-identity
+          `aws ecr get-login --no-include-email`
+    - run:
+        name: Configure environment variables
+        command: |
+          account_id=$(aws sts get-caller-identity --output text --query "Account")
+          region=$(aws configure list | grep region | awk '{print $2}')
+          image_tag="${account_id}.dkr.ecr.${region}.amazonaws.com/skymap/skymap-prowler:${CIRCLE_SHA1}"
+          echo "export account_id=${account_id}" >> $BASH_ENV
+          echo "export region=${region}" >> $BASH_ENV
+          echo "export image_tag=${image_tag}" >> $BASH_ENV
+    - run:
+        name: Build SkyMap Prowler Image
+        command: |
+          docker build --tag "${image_tag}" .
+    - deploy:
+        name: Push docker-images to ecr with only the commit and latest tag
+        command: |
+          `aws ecr get-login --region ${region} --no-include-email`
+          docker push "${image_tag}"
+          # tag as latest for auto-deploy
+          function ecr-retag {
+            echo "Retagging ecr image [${1}:${2}] as [${1}:${3}]"
+            aws ecr put-image --repository-name "$1" --image-tag "$3" --region ${region} --image-manifest "$(aws ecr batch-get-image --repository-name "$1" --image-ids imageTag="$2" --region ${region} --query images[].imageManifest --output text)"
+          }
+          ecr-retag skymap/skymap-prowler "${CIRCLE_SHA1}" "latest"
+    
+workflows:
+  version: 2
+  commit:
+    jobs:
+      - docker-build-image
